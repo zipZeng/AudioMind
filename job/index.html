@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AudioMind — 课堂录音智能检索</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f5f5; }
+    .app { max-width: 700px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; background: #fff; }
+
+    .header { padding: 16px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
+    .header h1 { font-size: 18px; }
+    .header .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+
+    .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+    .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; }
+    .msg.user { align-self: flex-end; background: #4f46e5; color: #fff; }
+    .msg.ai { align-self: flex-start; background: #f0f0f0; color: #333; }
+    .msg.info { align-self: center; background: #fef9c3; color: #854d0e; font-size: 12px; }
+
+    .input-area { padding: 16px 20px; border-top: 1px solid #eee; display: flex; gap: 8px; align-items: flex-end; }
+    .input-area textarea { flex: 1; border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; font-size: 14px; resize: none; outline: none; font-family: inherit; line-height: 1.5; }
+    .input-area textarea:focus { border-color: #4f46e5; }
+    .btn { padding: 10px 18px; border-radius: 10px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-send { background: #4f46e5; color: #fff; }
+    .btn-upload { background: #f0f0f0; color: #333; }
+
+    .file-bar { display: none; padding: 8px 14px; background: #f0f4ff; font-size: 13px; align-items: center; gap: 8px; }
+    .file-bar.show { display: flex; }
+    .file-bar .remove { color: #ef4444; cursor: pointer; }
+
+    .loading { display: flex; gap: 6px; padding: 12px; }
+    .loading span { width: 8px; height: 8px; border-radius: 50%; background: #ccc; animation: bounce 1.4s infinite; }
+    .loading span:nth-child(2) { animation-delay: .16s; }
+    .loading span:nth-child(3) { animation-delay: .32s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: scale(0.6); } 40% { transform: scale(1); } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <span class="dot"></span>
+    <h1>AudioMind 课堂助手</h1>
+  </div>
+
+  <div class="messages" id="messages">
+    <div class="msg ai">你好！我是课堂录音助手。<br><br>上传课堂录音后，你可以问我任何课程相关问题，比如：<br>• 昨天老师布置了什么作业？<br>• 第三章讲了哪些内容？<br>• 考试重点是什么？</div>
+  </div>
+
+  <div class="file-bar" id="fileBar">
+    📎 <span id="fileName"></span>
+    <span class="remove" onclick="clearFile()">✕</span>
+  </div>
+
+  <div class="input-area">
+    <button class="btn btn-upload" id="uploadBtn">📁 上传</button>
+    <input type="file" id="fileInput" accept="audio/*" hidden>
+    <textarea id="input" rows="1" placeholder="输入问题，或上传录音文件..."></textarea>
+    <button class="btn btn-send" id="sendBtn" disabled>发送</button>
+  </div>
+</div>
+
+<script>
+const messages = document.getElementById('messages');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const uploadBtn = document.getElementById('uploadBtn');
+const fileInput = document.getElementById('fileInput');
+const fileBar = document.getElementById('fileBar');
+const fileName = document.getElementById('fileName');
+
+let pendingFile = null;
+let streaming = false;
+
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+  sendBtn.disabled = (!input.value.trim() && !pendingFile) || streaming;
+});
+
+// ── 发送文本 ──────────────────────────────────────────
+sendBtn.addEventListener('click', async () => {
+  if (pendingFile) return sendAudio();
+  const text = input.value.trim();
+  if (!text || streaming) return;
+  streaming = true;
+  sendBtn.disabled = true;
+
+  addMsg('user', text);
+  input.value = '';
+  const loadingEl = showLoading();
+  const aiEl = addMsg('ai', '');
+
+  try {
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'query=' + encodeURIComponent(text),
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '', content = '';
+    loadingEl.remove();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.answer) { content += d.answer; aiEl.querySelector('.content').textContent = content; }
+        } catch (_) {}
+      }
+    }
+    if (!content) aiEl.querySelector('.content').textContent = '(未收到回复)';
+  } catch (e) {
+    loadingEl?.remove();
+    addMsg('info', '请求失败: ' + e.message);
+  }
+  streaming = false;
+  sendBtn.disabled = false;
+});
+
+// ── 发送音频 ──────────────────────────────────────────
+async function sendAudio() {
+  if (!pendingFile || streaming) return;
+  streaming = true;
+  sendBtn.disabled = true;
+
+  addMsg('user', `[音频] ${pendingFile.name}`);
+  const loadingEl = showLoading();
+
+  try {
+    const fd = new FormData();
+    fd.append('file', pendingFile);
+    const resp = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await resp.json();
+    loadingEl?.remove();
+    addMsg('info', `✅ 转写完成 (${data.text.length}字)\n\n${data.text}\n\n→ 已存入知识库，现在可以提问了`);
+    clearFile();
+  } catch (e) {
+    loadingEl?.remove();
+    addMsg('info', '上传失败: ' + e.message);
+  }
+  streaming = false;
+  sendBtn.disabled = false;
+}
+
+// ── 辅助 ──────────────────────────────────────────────
+function addMsg(role, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = `<span class="content">${escapeHtml(text)}</span>`;
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function showLoading() {
+  const el = document.createElement('div');
+  el.className = 'msg ai loading';
+  el.innerHTML = '<span></span><span></span><span></span>';
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+uploadBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) { pendingFile = f; fileName.textContent = f.name + ' (' + (f.size/1024).toFixed(1) + 'KB)'; fileBar.classList.add('show'); sendBtn.disabled = false; }
+});
+
+function clearFile() { pendingFile = null; fileBar.classList.remove('show'); fileInput.value = ''; sendBtn.disabled = !input.value.trim(); }
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
+});
+</script>
+</body>
+</html>
