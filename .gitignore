@@ -1,4 +1,23 @@
-.env
+# Python
 __pycache__/
 *.pyc
 .venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
