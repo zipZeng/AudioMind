@@ -11,7 +11,9 @@ FastAPI 后端，两个核心接口:
 """
 
 import os
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -26,6 +28,23 @@ from fastapi.staticfiles import StaticFiles
 # ── 日志 ──────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="[AudioMind] %(message)s")
 log = logging.getLogger(__name__)
+
+# ── 本地转写存储（Dify API 不返迴正文，需要自己存） ──────
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DATA_FILE = DATA_DIR / "transcriptions.json"
+
+def _load_local():
+    if not DATA_FILE.exists():
+        return {}
+    with open(DATA_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+def _save_local(doc_id: str, name: str, text: str, chars: int):
+    data = _load_local()
+    data[doc_id] = {"name": name, "text": text, "chars": chars}
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ── 配置（全部通过环境变量注入） ──────────────────────────
 DIFY_API_URL     = os.getenv("DIFY_API_URL",     "https://cloud.dify.ai/v1")
@@ -218,6 +237,8 @@ async def upload_audio(file: UploadFile = File(...)):
         try:
             dify_result = await _push_to_dify(text, filename)
             doc_id = dify_result.get("document", {}).get("id", "")
+            if doc_id:
+                _save_local(doc_id, filename, text, len(text))
         except Exception as e:
             log.warning(f"知识库写入失败（转写不受影响）: {e}")
     else:
@@ -317,6 +338,125 @@ async def health():
         },
         "missing": missing,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# 知识库管理
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/manage")
+async def manage_page():
+    """知识库管理页面"""
+    import os as _os
+    html_path = _os.path.join(_os.path.dirname(__file__), "records.html")
+    if not _os.path.exists(html_path):
+        raise HTTPException(404, "管理页面不存在")
+    return HTMLResponse(open(html_path, encoding="utf-8").read())
+
+
+@app.get("/records")
+async def list_records(page: int = 1, limit: int = 20):
+    """从 Dify 知识库获取已上传的录音列表"""
+    if not DIFY_DATASET_KEY or not DIFY_DATASET_ID:
+        raise HTTPException(503, "知识库未配置")
+
+    async with httpx.AsyncClient(timeout=30, proxy=DIFY_PROXY or None) as client:
+        resp = await client.get(
+            f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/documents",
+            headers={"Authorization": f"Bearer {DIFY_DATASET_KEY}"},
+            params={"page": page, "limit": limit},
+        )
+
+    if resp.status_code != 200:
+        log.error(f"获取知识库列表失败 ({resp.status_code}): {resp.text[:200]}")
+        raise HTTPException(502, f"知识库查询失败: {resp.status_code}")
+
+    data = resp.json()
+    local = _load_local()
+    docs = []
+    for d in data.get("data", []):
+        ts = d.get("created_at", 0)
+        try:
+            date_str = __import__("datetime").datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            date_str = str(ts)
+        doc_id = d.get("id")
+        local_data = local.get(doc_id, {})
+        text_preview = local_data.get("text", "") or ""
+        docs.append({
+            "id": doc_id,
+            "name": d.get("name", ""),
+            "chars": local_data.get("chars", d.get("word_count", 0)),
+            "status": d.get("display_status", d.get("indexing_status", "")),
+            "created_at": date_str,
+            "text": text_preview,
+        })
+
+    return {
+        "total": data.get("total", len(docs)),
+        "page": data.get("page", page),
+        "limit": data.get("limit", limit),
+        "data": docs,
+    }
+
+
+@app.get("/records/{doc_id}")
+async def get_record(doc_id: str):
+    """获取单条录音详情（含转写正文）"""
+    if not DIFY_DATASET_KEY or not DIFY_DATASET_ID:
+        raise HTTPException(503, "知识库未配置")
+
+    async with httpx.AsyncClient(timeout=30, proxy=DIFY_PROXY or None) as client:
+        resp = await client.get(
+            f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/documents/{doc_id}",
+            headers={"Authorization": f"Bearer {DIFY_DATASET_KEY}"},
+            params={"metadata": "without"},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(502, f"查询失败: {resp.status_code}")
+
+    d = resp.json()
+    doc_id = d.get("id")
+    ts = d.get("created_at", 0)
+    try:
+        date_str = __import__("datetime").datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        date_str = str(ts)
+    local_data = _load_local().get(doc_id, {})
+    return {
+        "id": doc_id,
+        "name": d.get("name", ""),
+        "chars": local_data.get("chars", d.get("word_count", 0)),
+        "created_at": date_str,
+        "text": local_data.get("text", ""),
+    }
+
+
+@app.delete("/records/{doc_id}")
+async def delete_record(doc_id: str):
+    """从 Dify 知识库删除录音文档"""
+    if not DIFY_DATASET_KEY or not DIFY_DATASET_ID:
+        raise HTTPException(503, "知识库未配置")
+
+    async with httpx.AsyncClient(timeout=30, proxy=DIFY_PROXY or None) as client:
+        resp = await client.delete(
+            f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/documents/{doc_id}",
+            headers={"Authorization": f"Bearer {DIFY_DATASET_KEY}"},
+        )
+
+    if resp.status_code not in (200, 204):
+        log.error(f"删除文档失败 ({resp.status_code}): {resp.text[:200]}")
+        raise HTTPException(502, f"删除失败: {resp.status_code}")
+
+    # 同步删除本地存储
+    data = _load_local()
+    if doc_id in data:
+        del data[doc_id]
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return {"success": True}
 
 
 # ═══════════════════════════════════════════════════════════
