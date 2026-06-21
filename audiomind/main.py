@@ -24,6 +24,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # ── 日志 ──────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="[AudioMind] %(message)s")
@@ -254,23 +255,43 @@ async def upload_audio(file: UploadFile = File(...)):
     })
 
 
+class ChatRequest(BaseModel):
+    query: str
+    conversation_id: str = ""
+
+
 @app.post("/chat")
-async def chat(query: str = Form(...)):
+async def chat(req: ChatRequest):
     """
     提问 → 转发 Dify Chatflow → SSE 流式返回
-
-    curl -N -X POST http://localhost:8080/chat -d "query=布置了什么作业"
+    支持多轮对话: 传入 conversation_id 继续之前会话
+    接受 JSON body: {"query": "...", "conversation_id": "..."}
     """
     missing = _check_config()
     if missing:
         raise HTTPException(503, f"服务未配置: {', '.join(missing)}")
 
-    if not query or not query.strip():
+    query = req.query.strip()
+    if not query:
         raise HTTPException(400, "问题不能为空")
+
+    cid = req.conversation_id.strip() if req.conversation_id else ""
+    is_new = not cid
+    log.info(f"💬 收到提问 | query={query[:80]}... | {'新对话' if is_new else '续接对话:' + cid}")
 
     async def sse_generator():
         """异步生成器：逐行转发 Dify 的 SSE 流"""
         try:
+            # 构建 Dify 请求体
+            dify_body = {
+                "query": query,
+                "response_mode": "streaming",
+                "user": "student",
+                "inputs": {"user_input": query},
+            }
+            if cid:
+                dify_body["conversation_id"] = cid
+
             async with httpx.AsyncClient(timeout=120, proxy=DIFY_PROXY or None) as client:
                 async with client.stream(
                     "POST",
@@ -279,12 +300,7 @@ async def chat(query: str = Form(...)):
                         "Authorization": f"Bearer {DIFY_API_KEY}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "query": query.strip(),
-                        "response_mode": "streaming",
-                        "user": "student",
-                        "inputs": {"user_input": query.strip()},
-                    },
+                    json=dify_body,
                 ) as dify_resp:
                     if dify_resp.status_code != 200:
                         body = await dify_resp.aread()
@@ -293,7 +309,10 @@ async def chat(query: str = Form(...)):
                         return
 
                     async for line in dify_resp.aiter_lines():
-                        if line and line.startswith("data:"):
+                        if not line:
+                            continue
+                        # 转发所有以 data: 开头的行（含 conversation_id 信息）
+                        if line.startswith("data:"):
                             yield f"{line}\n\n"
 
         except httpx.ConnectError:

@@ -75,7 +75,7 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 | 页面 | 地址 | 功能 |
 |------|------|------|
-| 对话 | `/` | 上传录音、提问 |
+| 对话 | `/` | 上传录音、提问、新对话 |
 | 知识库管理 | `/manage` | 查看/搜索/删除录音 |
 
 ---
@@ -85,7 +85,7 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/upload` | POST | 上传音频，ASR 转写并推入知识库 |
-| `/chat` | POST | 提问，SSE 流式返回 Dify 回答 |
+| `/chat` | POST | 提问 (JSON body: `{"query":"...", "conversation_id":""}`)，SSE 流式返回 Dify 回答，支持多轮对话 |
 | `/records` | GET | 知识库录音列表（含本地缓存的转写正文） |
 | `/records/{id}` | GET | 单条录音详情 + 完整转写文本 |
 | `/records/{id}` | DELETE | 删除知识库录音 |
@@ -138,8 +138,9 @@ AudioMind/
 | Dify 知识库入库 | ✅ |
 | Dify Agent 对话 + SSE 流式 | ✅ |
 | 知识库管理面板（查看/搜索/删除） | ✅ |
+| 多轮对话（conversation_id 持久化） | ✅ |
+| 新对话按钮（一键清空上下文） | ✅ |
 | Docker 部署 | ✅ 就绪 |
-| 多轮对话 | 🔜 |
 | 课程名称标注 | 🔜 |
 
 ---
