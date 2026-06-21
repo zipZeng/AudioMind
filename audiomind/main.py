@@ -14,6 +14,9 @@ import os
 import logging
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import httpx
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,8 +29,10 @@ log = logging.getLogger(__name__)
 
 # ── 配置（全部通过环境变量注入） ──────────────────────────
 DIFY_API_URL     = os.getenv("DIFY_API_URL",     "https://cloud.dify.ai/v1")
-DIFY_API_KEY     = os.getenv("DIFY_API_KEY",     "")
-DIFY_DATASET_ID  = os.getenv("DIFY_DATASET_ID",  "")
+DIFY_API_KEY     = os.getenv("DIFY_API_KEY",     "")      # Chatflow/Agent 对话用
+DIFY_DATASET_ID  = os.getenv("DIFY_DATASET_ID",  "")      # 知识库 ID
+DIFY_DATASET_KEY = os.getenv("DIFY_DATASET_KEY", "")      # 知识库写入用
+DIFY_PROXY       = os.getenv("DIFY_PROXY",       "")      # 代理地址，如 http://127.0.0.1:7897
 
 # ASR 模式: "local" = 本地 faster-whisper(:8081) | "api" = 云端 Whisper API
 ASR_MODE         = os.getenv("ASR_MODE",         "local")
@@ -61,6 +66,8 @@ def _check_config():
         missing.append("DIFY_API_KEY")
     if not DIFY_DATASET_ID:
         missing.append("DIFY_DATASET_ID")
+    if not DIFY_DATASET_KEY or DIFY_DATASET_KEY == "dataset-xxx":
+        missing.append("DIFY_DATASET_KEY")
     if ASR_MODE == "api":
         if not OPENAI_API_KEY or OPENAI_API_KEY == "sk-xxx":
             missing.append("OPENAI_API_KEY")
@@ -160,14 +167,27 @@ async def _push_to_dify(text: str, filename: str) -> dict:
         "name": filename,
         "text": text,
         "indexing_technique": "high_quality",
-        "process_rule": {"mode": "automatic"},
+        "process_rule": {
+            "mode": "custom",
+            "rules": {
+                "pre_processing_rules": [
+                    {"id": "remove_extra_spaces", "enabled": True},
+                    {"id": "remove_urls_emails", "enabled": False},
+                ],
+                "segmentation": {
+                    "separator": "\n",
+                    "max_tokens": 200,
+                    "overlap_tokens": 50,
+                },
+            },
+        },
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60, proxy=DIFY_PROXY or None) as client:
         resp = await client.post(
             f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/document/create-by-text",
             headers={
-                "Authorization": f"Bearer {DIFY_API_KEY}",
+                "Authorization": f"Bearer {DIFY_DATASET_KEY}",
                 "Content-Type": "application/json",
             },
             json=body,
@@ -208,7 +228,7 @@ async def upload_audio(file: UploadFile = File(...)):
     # 入库 Dify（可选，配置了才推）
     filename = file.filename or "课堂录音"
     doc_id = ""
-    dify_ok = not ("DIFY_API_KEY" in _check_config() or "DIFY_DATASET_ID" in _check_config())
+    dify_ok = not ("DIFY_API_KEY" in _check_config() or "DIFY_DATASET_ID" in _check_config() or "DIFY_DATASET_KEY" in _check_config())
     if dify_ok:
         try:
             dify_result = await _push_to_dify(text, filename)
@@ -245,7 +265,7 @@ async def chat(query: str = Form(...)):
     async def sse_generator():
         """异步生成器：逐行转发 Dify 的 SSE 流"""
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=120, proxy=DIFY_PROXY or None) as client:
                 async with client.stream(
                     "POST",
                     f"{DIFY_API_URL}/chat-messages",
@@ -257,7 +277,7 @@ async def chat(query: str = Form(...)):
                         "query": query.strip(),
                         "response_mode": "streaming",
                         "user": "student",
-                        "inputs": {},
+                        "inputs": {"user_input": query.strip()},
                     },
                 ) as dify_resp:
                     if dify_resp.status_code != 200:
@@ -312,6 +332,65 @@ async def health():
         },
         "missing": missing,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# 知识库管理
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/records")
+async def list_records(page: int = 1, limit: int = 20):
+    """从 Dify 知识库获取已上传的录音列表"""
+    if not DIFY_DATASET_KEY or not DIFY_DATASET_ID:
+        raise HTTPException(503, "知识库未配置")
+
+    async with httpx.AsyncClient(timeout=30, proxy=DIFY_PROXY or None) as client:
+        resp = await client.get(
+            f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/documents",
+            headers={"Authorization": f"Bearer {DIFY_DATASET_KEY}"},
+            params={"page": page, "limit": limit},
+        )
+
+    if resp.status_code != 200:
+        log.error(f"获取知识库列表失败 ({resp.status_code}): {resp.text[:200]}")
+        raise HTTPException(502, f"知识库查询失败: {resp.status_code}")
+
+    data = resp.json()
+    docs = []
+    for d in data.get("data", []):
+        docs.append({
+            "id": d.get("id"),
+            "name": d.get("name", ""),
+            "chars": d.get("word_count", 0),
+            "status": d.get("display_status", d.get("indexing_status", "")),
+            "created_at": d.get("created_at", ""),
+        })
+
+    return {
+        "total": data.get("total", len(docs)),
+        "page": data.get("page", page),
+        "limit": data.get("limit", limit),
+        "data": docs,
+    }
+
+
+@app.delete("/records/{doc_id}")
+async def delete_record(doc_id: str):
+    """从 Dify 知识库删除录音文档"""
+    if not DIFY_DATASET_KEY or not DIFY_DATASET_ID:
+        raise HTTPException(503, "知识库未配置")
+
+    async with httpx.AsyncClient(timeout=30, proxy=DIFY_PROXY or None) as client:
+        resp = await client.delete(
+            f"{DIFY_API_URL}/datasets/{DIFY_DATASET_ID}/documents/{doc_id}",
+            headers={"Authorization": f"Bearer {DIFY_DATASET_KEY}"},
+        )
+
+    if resp.status_code not in (200, 204):
+        log.error(f"删除文档失败 ({resp.status_code}): {resp.text[:200]}")
+        raise HTTPException(502, f"删除失败: {resp.status_code}")
+
+    return {"success": True}
 
 
 # ═══════════════════════════════════════════════════════════
