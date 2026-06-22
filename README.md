@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green)](https://fastapi.tiangolo.com/)
 [![Dify](https://img.shields.io/badge/Dify-API-purple)](https://api.dify.ai/)
+[![Docker](https://img.shields.io/badge/Docker-ready-blue)](https://www.docker.com/)
 
 ---
 
@@ -36,13 +37,27 @@ SenseVoiceSmall      知识库 + Chatflow Agent
 
 ## 🚀 快速开始
 
-### 1. 前置准备
+### 方式一：Docker 部署（推荐，无需安装 Python）
+
+```bash
+git clone https://github.com/zipZeng/AudioMind.git
+cd AudioMind/audiomind
+cp .env.example .env
+# 编辑 .env 填入 API Key
+docker compose up -d
+```
+
+浏览器打开 `http://localhost:8080` 即可使用。
+
+### 方式二：手动运行（需要 Python 3.10+）
+
+**1. 前置准备**
 
 - **Dify 账号**：创建 Chatflow 应用 + 知识库，获取 API Key
 - **硅基流动 API Key**：[SiliconFlow](https://siliconflow.cn) 注册获取
 - **Python 3.10+**
 
-### 2. 配置
+**2. 配置**
 
 ```bash
 cd audiomind
@@ -64,14 +79,14 @@ DIFY_DATASET_ID=xxx-xxx        # 知识库 ID
 DIFY_DATASET_KEY=dataset-xxx   # 知识库读写
 ```
 
-### 3. 启动
+**3. 启动**
 
 ```bash
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8080
 ```
 
-### 4. 使用
+### 使用
 
 | 页面 | 地址 | 功能 |
 |------|------|------|
@@ -84,7 +99,8 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/upload` | POST | 上传音频，ASR 转写并推入知识库 |
+| `/upload` | POST | 上传音频（可选 `course` 字段），返回 task_id，后台异步处理 |
+| `/upload/{task_id}` | GET | 查询转写进度（transcribing → indexing → done） |
 | `/chat` | POST | 提问 (JSON body: `{"query":"...", "conversation_id":""}`)，SSE 流式返回 Dify 回答，支持多轮对话 |
 | `/records` | GET | 知识库录音列表（含本地缓存的转写正文） |
 | `/records/{id}` | GET | 单条录音详情 + 完整转写文本 |
@@ -121,6 +137,7 @@ AudioMind/
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   ├── docker-compose.yml
+│   ├── .dockerignore
 │   └── .env.example
 ├── job/                      # 项目文档
 │   ├── docs/                 # 需求/设计/测试/用户手册/PPT大纲
