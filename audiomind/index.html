@@ -69,8 +69,14 @@
       text-align: center; padding: 8px 16px; border-radius: 20px; }
 
     .citation {
-      display: inline-block; font-size: 11px; color: #888; background: #e8eaed;
-      padding: 1px 6px; border-radius: 4px; margin: 0 2px;
+      display: inline-block; font-size: 11px; color: #4f46e5; background: #eef0ff;
+      padding: 2px 8px; border-radius: 4px; margin: 0 2px; white-space: nowrap;
+      border: 1px solid #d4d8f0;
+    }
+    .citation-block {
+      display: block; margin-top: 10px; padding: 8px 12px;
+      background: #f8f9fc; border-left: 3px solid #4f46e5;
+      border-radius: 0 6px 6px 0; font-size: 12px; color: #666; line-height: 1.6;
     }
 
     /* loading */
@@ -248,6 +254,25 @@ function showLoading() {
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+// ── 引用格式化 ──────────────────────────────────────────
+function formatCitations(text) {
+  if (!text) return text;
+  let html = esc(text);
+  // 📎 来源：开头的整行 → block 引用框
+  html = html.replace(/(?:<br>|\n)?(📎 来源[：:].*?(?:\n• .*)*)/g,
+    '<div class="citation-block">$1</div>');
+  // （来源：XXX）或 (来源：XXX) → 行内引用标签
+  html = html.replace(/([（(]来源[：:][^)）]+[)）])/g,
+    '<span class="citation">$1</span>');
+  // 「来源：XXX」→ 行内引用标签
+  html = html.replace(/(「来源[：:][^」]+」)/g,
+    '<span class="citation">$1</span>');
+  // 文件引用：提到具体的录音文件名 → 行内标签
+  html = html.replace(/《([^》]+\.(?:mp3|wav|m4a|webm))》/g,
+    '<span class="citation">📎 $1</span>');
+  return html;
+}
+
 function showToast(msg, isErr = true) {
   toast.textContent = msg; toast.style.background = isErr ? '#dc2626' : '#1a1a2e';
   toast.classList.add('show');
@@ -326,7 +351,7 @@ async function sendText() {
           } else if (d.answer !== undefined && d.answer !== null) {
             content += d.answer;
           }
-          bubble.textContent = content;
+          bubble.innerHTML = formatCitations(content);
           msgList.scrollTop = msgList.scrollHeight;
         } catch (_) {
           // 非 JSON 的 data 行（如 [DONE]），忽略
@@ -341,6 +366,7 @@ async function sendText() {
     }
 
     if (!content) bubble.textContent = '(未收到回复)';
+    else bubble.innerHTML = formatCitations(content);
   } catch (e) {
     loadingEl?.remove();
     if (e.name !== 'AbortError') {
