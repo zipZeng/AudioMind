@@ -129,12 +129,18 @@
 
     /* file bar */
     .file-bar {
-      display: none; align-items: center; gap: 8px; padding: 8px 14px;
+      display: none; flex-direction: column; gap: 6px; padding: 10px 14px;
       background: #f0f4ff; border-radius: 10px; margin-bottom: 8px; font-size: 13px;
     }
     .file-bar.show { display: flex; }
+    .file-bar .row { display: flex; align-items: center; gap: 8px; }
     .file-bar .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .file-bar .remove { color: #ef4444; cursor: pointer; font-size: 16px; border: none; background: none; }
+    .file-bar .course-input {
+      width: 100%; padding: 6px 10px; border: 1.5px solid #d4d8f0; border-radius: 8px;
+      font-size: 13px; outline: none; background: #fff; font-family: inherit;
+    }
+    .file-bar .course-input:focus { border-color: #4f46e5; }
 
     /* toast */
     .toast {
@@ -178,8 +184,12 @@
   </div>
 
   <div class="file-bar" id="fileBar">
-    <span>📎</span><span class="name" id="fileName"></span>
-    <button class="remove" id="removeFile">✕</button>
+    <div class="row">
+      <span>📎</span><span class="name" id="fileName"></span>
+      <button class="remove" id="removeFile">✕</button>
+    </div>
+    <input class="course-input" id="courseInput" placeholder="标注课程名称，如：高等数学、软件工程..." list="courseList" autocomplete="off">
+    <datalist id="courseList"></datalist>
   </div>
 
   <div class="input-area">
@@ -207,6 +217,8 @@ const fileInput  = document.getElementById('fileInput');
 const fileBar    = document.getElementById('fileBar');
 const fileName   = document.getElementById('fileName');
 const removeFile = document.getElementById('removeFile');
+const courseInput = document.getElementById('courseInput');
+const courseList  = document.getElementById('courseList');
 const statusDot  = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const toast      = document.getElementById('toast');
@@ -395,10 +407,15 @@ async function sendAudio() {
 
   const phaseNames = { transcribing: '🎙️ 正在语音转写...', indexing: '📚 正在存入知识库...', done: '✅ 完成' };
 
+  // 保存课程名到历史
+  const courseName = courseInput.value.trim();
+  if (courseName) saveCourseToHistory(courseName);
+
   // 1. 上传文件（快速返回 task_id）
   let taskId;
   try {
     const fd = new FormData(); fd.append('file', pendingFile);
+    if (courseName) fd.append('course', courseName);
     const resp = await fetch('/upload', { method: 'POST', body: fd });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || e.error || '上传失败'); }
     const data = await resp.json();
@@ -474,6 +491,25 @@ input.addEventListener('input', () => {
   sendBtn.disabled = (!input.value.trim() && !pendingFile) || streaming;
 });
 
+// ── 课程名历史 ──────────────────────────────────────────
+function loadCourseHistory() {
+  try { return JSON.parse(localStorage.getItem('audiomind_courses') || '[]'); }
+  catch (_) { return []; }
+}
+function saveCourseToHistory(course) {
+  if (!course) return;
+  let courses = loadCourseHistory();
+  courses = courses.filter(c => c !== course);
+  courses.unshift(course);
+  courses = courses.slice(0, 10);
+  localStorage.setItem('audiomind_courses', JSON.stringify(courses));
+  updateCourseDatalist();
+}
+function updateCourseDatalist() {
+  courseList.innerHTML = loadCourseHistory().map(c => `<option value="${esc(c)}">`).join('');
+}
+updateCourseDatalist();
+
 uploadBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => {
   const f = fileInput.files[0];
@@ -481,14 +517,17 @@ fileInput.addEventListener('change', () => {
     if (f.size > 25*1024*1024) { showToast('文件不能超过 25MB'); return; }
     pendingFile = f;
     fileName.textContent = f.name + ' (' + (f.size/1024).toFixed(1) + 'KB)';
+    courseInput.value = '';
     fileBar.classList.add('show');
+    courseInput.focus();
     sendBtn.disabled = false;
   }
 });
 removeFile.addEventListener('click', clearFile);
 function clearFile() {
   pendingFile = null; fileBar.classList.remove('show');
-  fileInput.value = ''; sendBtn.disabled = !input.value.trim() || streaming;
+  fileInput.value = ''; courseInput.value = '';
+  sendBtn.disabled = !input.value.trim() || streaming;
 }
 
 // 拖放文件
@@ -499,6 +538,7 @@ document.addEventListener('drop', e => {
   if (f && f.type.startsWith('audio/')) {
     pendingFile = f;
     fileName.textContent = f.name + ' (' + (f.size/1024).toFixed(1) + 'KB)';
+    courseInput.value = '';
     fileBar.classList.add('show');
     sendBtn.disabled = false;
   }

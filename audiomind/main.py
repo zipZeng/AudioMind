@@ -44,9 +44,9 @@ def _load_local():
     with open(DATA_FILE, encoding="utf-8") as f:
         return json.load(f)
 
-def _save_local(doc_id: str, name: str, text: str, chars: int):
+def _save_local(doc_id: str, name: str, text: str, chars: int, course: str = ""):
     data = _load_local()
-    data[doc_id] = {"name": name, "text": text, "chars": chars}
+    data[doc_id] = {"name": name, "text": text, "chars": chars, "course": course}
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -235,7 +235,7 @@ async def _push_to_dify(text: str, filename: str) -> dict:
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/upload")
-async def upload_audio(file: UploadFile = File(...)):
+async def upload_audio(file: UploadFile = File(...), course: str = Form("")):
     """
     上传课堂录音 → 返回 task_id，后台异步处理
 
@@ -260,6 +260,7 @@ async def upload_audio(file: UploadFile = File(...)):
         raise HTTPException(413, f"文件超过 {MAX_FILE_SIZE // 1024 // 1024}MB 限制")
 
     filename = file.filename or "课堂录音"
+    course_name = course.strip()
     task_id = str(uuid.uuid4())
     now = time.time()
 
@@ -268,21 +269,23 @@ async def upload_audio(file: UploadFile = File(...)):
         "phase": "transcribing",
         "progress": 5,
         "filename": filename,
+        "course": course_name,
         "file_size": len(content),
         "created_at": now,
     }
 
     # 后台异步处理
-    asyncio.create_task(_process_upload(task_id, content, filename, content_type))
+    asyncio.create_task(_process_upload(task_id, content, filename, content_type, course_name))
 
     return JSONResponse({
         "task_id": task_id,
         "phase": "transcribing",
         "filename": filename,
+        "course": course_name,
     })
 
 
-async def _process_upload(task_id: str, content: bytes, filename: str, content_type: str):
+async def _process_upload(task_id: str, content: bytes, filename: str, content_type: str, course: str = ""):
     """后台任务：转写 + 入库，逐阶段更新进度"""
     try:
         # 阶段 1: 转写
@@ -290,16 +293,19 @@ async def _process_upload(task_id: str, content: bytes, filename: str, content_t
         text = await _transcribe_bytes(content, filename, content_type)
         _tasks[task_id].update({"phase": "transcribing", "progress": 80})
 
+        # Dify 文档名：课程名 + 文件名
+        dify_name = f"【{course}】{filename}" if course else filename
+
         # 阶段 2: 入库 Dify
         doc_id = ""
         dify_ok = not ("DIFY_API_KEY" in _check_config() or "DIFY_DATASET_ID" in _check_config())
         if dify_ok:
             _tasks[task_id].update({"phase": "indexing", "progress": 85})
             try:
-                dify_result = await _push_to_dify(text, filename)
+                dify_result = await _push_to_dify(text, dify_name)
                 doc_id = dify_result.get("document", {}).get("id", "")
                 if doc_id:
-                    _save_local(doc_id, filename, text, len(text))
+                    _save_local(doc_id, filename, text, len(text), course)
                 _tasks[task_id].update({"progress": 95})
             except Exception as e:
                 log.warning(f"知识库写入失败（转写不受影响）: {e}")
@@ -315,11 +321,12 @@ async def _process_upload(task_id: str, content: bytes, filename: str, content_t
                 "text": text,
                 "chars": len(text),
                 "document_id": doc_id,
+                "course": course,
                 "dify_synced": bool(doc_id),
                 "message": f"已转写 ({len(text)} 字)" + (", 已存入知识库" if doc_id else ""),
             },
         })
-        log.info(f"任务完成: {task_id} | {len(text)} 字")
+        log.info(f"任务完成: {task_id} | {len(text)} 字 | 课程: {course or '未标注'}")
 
     except HTTPException as e:
         _tasks[task_id].update({"phase": "error", "error": e.detail, "progress": 0})
@@ -492,6 +499,7 @@ async def list_records(page: int = 1, limit: int = 20):
         docs.append({
             "id": doc_id,
             "name": d.get("name", ""),
+            "course": local_data.get("course", ""),
             "chars": local_data.get("chars", d.get("word_count", 0)),
             "status": d.get("display_status", d.get("indexing_status", "")),
             "created_at": date_str,
@@ -533,6 +541,7 @@ async def get_record(doc_id: str):
     return {
         "id": doc_id,
         "name": d.get("name", ""),
+        "course": local_data.get("course", ""),
         "chars": local_data.get("chars", d.get("word_count", 0)),
         "created_at": date_str,
         "text": local_data.get("text", ""),

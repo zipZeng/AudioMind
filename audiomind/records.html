@@ -78,7 +78,8 @@ async function load(p) {
           var tid = 't' + r.id.replace(/-/g,'');
           txt = '<div id="' + tid + '" style="font-size:12px;color:#666;margin-top:4px;line-height:1.6;max-height:60px;overflow:hidden;white-space:pre-wrap;background:#f8f9fa;padding:6px 8px;border-radius:4px">' + esc(r.text) + '</div><span id="' + tid + 'b" style="font-size:11px;color:#4f46e5;cursor:pointer;margin-top:2px;display:inline-block" onclick="var e=document.getElementById(\'' + tid + '\');var b=document.getElementById(\'' + tid + 'b\');if(e.style.maxHeight==\'none\'){e.style.maxHeight=\'60px\';b.textContent=\'展开全部 ↓\'}else{e.style.maxHeight=\'none\';b.textContent=\'收起 ↑\'}">展开全部 ↓</span>';
         }
-        h += '<div class="item"><div class="r"><div class="t">' + esc(r.name) + '</div><div class="s">' + (r.chars || 0) + ' 字 · ' + (r.created_at || '') + ' · ' + (r.status || '') + '</div>' + txt + '</div><button class="del" onclick="del(\'' + r.id + '\')">✕</button></div>';
+        var courseTag = r.course ? '<span style="display:inline-block;font-size:11px;color:#4f46e5;background:#eef0ff;padding:1px 7px;border-radius:3px;margin-right:6px;border:1px solid #d4d8f0">' + esc(r.course) + '</span>' : '';
+        h += '<div class="item"><div class="r"><div class="t">' + courseTag + esc(r.name) + '</div><div class="s">' + (r.chars || 0) + ' 字 · ' + (r.created_at || '') + ' · ' + (r.status || '') + '</div>' + txt + '</div><button class="del" onclick="del(\'' + r.id + '\')">✕</button></div>';
       }
       list.innerHTML = h;
     }
