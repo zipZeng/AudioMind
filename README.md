@@ -7,6 +7,9 @@
 [![Dify](https://img.shields.io/badge/Dify-API-purple)](https://api.dify.ai/)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue)](https://www.docker.com/)
 
+🔗 **在线演示**: http://106.52.27.82:8080  
+📦 **GitHub**: https://github.com/zipZeng/AudioMind
+
 ---
 
 ## 💡 一句话理解
@@ -14,6 +17,16 @@
 ```
 学生录音 → 转文字 → 推入 Dify 知识库 → Dify Agent 回答 → 前端展示
 ```
+
+---
+
+## 🖥️ 在线演示
+
+项目已部署在云服务器，浏览器直接访问：
+
+> **http://106.52.27.82:8080**
+
+> ⚠️ 演示环境使用 HTTP 协议，浏览器会提示"不安全"——点击"继续访问"即可正常使用。这是因为 HTTP 为明文传输，生产环境建议配置 HTTPS + 域名。
 
 ---
 
@@ -119,7 +132,7 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 | 后端 | FastAPI + httpx |
 | ASR | SiliconFlow SenseVoiceSmall |
 | 知识库 & RAG | Dify 平台 |
-| LLM | Dify 内置模型 |
+| LLM | DeepSeek-V3 |
 | 本地存储 | JSON 文件（转写正文缓存） |
 
 ---
