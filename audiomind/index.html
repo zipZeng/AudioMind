@@ -81,6 +81,16 @@
     .loading span:nth-child(3) { animation-delay: .32s; }
     @keyframes bounce { 0%,80%,100%{transform:scale(.6)} 40%{transform:scale(1)} }
 
+    /* progress */
+    .progress-wrap { padding: 8px 0; }
+    .progress-phase { font-size: 12px; color: #888; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .progress-phase .elapsed { color: #aaa; }
+    .progress-bar { height: 5px; background: #e8eaed; border-radius: 3px; overflow: hidden; }
+    .progress-bar .fill { height: 100%; background: linear-gradient(90deg, #4f46e5, #7c3aed); border-radius: 3px;
+      transition: width .4s ease; width: 0%; }
+    .progress-bar.indeterminate .fill { width: 40%; animation: slide 1.5s ease-in-out infinite; }
+    @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+
     /* input */
     .input-area { padding: 14px 20px; border-top: 1px solid #eee; border-radius: 0 0 16px 16px; }
     .input-row { display: flex; gap: 8px; align-items: flex-end; }
@@ -352,25 +362,77 @@ async function sendAudio() {
   streaming = true; sendBtn.disabled = true;
 
   addMsg('user', `[音频] ${pendingFile.name}`);
-  const loadingEl = showLoading();
+  const aiEl = addMsg('ai', '');
+  const bubble = aiEl.querySelector('.bubble');
+  bubble.innerHTML = '';
+  bubble.classList.add('progress-wrap');
 
+  const phaseNames = { transcribing: '🎙️ 正在语音转写...', indexing: '📚 正在存入知识库...', done: '✅ 完成' };
+
+  // 1. 上传文件（快速返回 task_id）
+  let taskId;
   try {
     const fd = new FormData(); fd.append('file', pendingFile);
     const resp = await fetch('/upload', { method: 'POST', body: fd });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || '上传失败'); }
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || e.error || '上传失败'); }
     const data = await resp.json();
-    loadingEl?.remove();
-    addMsg('info', `✅ 转写完成，已存入知识库\n\n${data.text}\n\n现在可以就这段录音提问了。`);
+    taskId = data.task_id;
   } catch (e) {
-    loadingEl?.remove();
-    addMsg('info', '❌ ' + e.message);
+    bubble.classList.remove('progress-wrap');
+    bubble.textContent = '❌ ' + e.message;
+    streaming = false; sendBtn.disabled = false;
+    clearFile();
+    return;
   }
 
-  conversationId = '';
-  localStorage.removeItem('audiomind_cid');
-  clearFile();
-  streaming = false; sendBtn.disabled = false;
-  input.focus();
+  // 2. 轮询进度
+  let startTime = Date.now();
+  let pollTimer = setInterval(async () => {
+    try {
+      const d = await (await fetch('/upload/' + taskId)).json();
+      let elapsed = Math.round((Date.now() - startTime) / 1000);
+
+      if (d.phase === 'error') {
+        clearInterval(pollTimer);
+        bubble.classList.remove('progress-wrap');
+        bubble.textContent = '❌ ' + (d.error || '处理失败');
+        finishUpload();
+        return;
+      }
+
+      if (d.phase === 'done') {
+        clearInterval(pollTimer);
+        bubble.classList.remove('progress-wrap');
+        bubble.innerHTML = '';
+        // 显示结果
+        const r = d.result;
+        if (r && r.text) {
+          addMsg('info', `✅ 转写完成，已存入知识库\n\n${r.text}\n\n现在可以就这段录音提问了。`);
+        }
+        bubble.remove();
+        finishUpload();
+        return;
+      }
+
+      // 更新进度条
+      let pct = d.progress || 0;
+      let phaseText = phaseNames[d.phase] || '处理中...';
+      bubble.innerHTML = `
+        <div class="progress-phase"><span>${phaseText}</span><span class="elapsed">${elapsed}s</span></div>
+        <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>`;
+      bubble.classList.add('progress-wrap');
+    } catch (_) {
+      // 网络错误，继续轮询
+    }
+  }, 1500);
+
+  function finishUpload() {
+    conversationId = '';
+    localStorage.removeItem('audiomind_cid');
+    clearFile();
+    streaming = false; sendBtn.disabled = false;
+    input.focus();
+  }
 }
 
 // ── 事件 ──────────────────────────────────────────────────

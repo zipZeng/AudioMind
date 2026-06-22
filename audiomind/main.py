@@ -13,6 +13,9 @@ FastAPI 后端，两个核心接口:
 import os
 import json
 import logging
+import asyncio
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import httpx
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +49,16 @@ def _save_local(doc_id: str, name: str, text: str, chars: int):
     data[doc_id] = {"name": name, "text": text, "chars": chars}
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ── 异步任务进度存储 ──────────────────────────────────────
+_tasks: dict = {}  # task_id → {phase, progress, filename, created_at, result?}
+
+def _cleanup_tasks():
+    """清理超过 10 分钟的旧任务"""
+    now = time.time()
+    stale = [tid for tid, t in _tasks.items() if now - t.get("created_at", 0) > 600]
+    for tid in stale:
+        del _tasks[tid]
 
 # ── 配置（全部通过环境变量注入） ──────────────────────────
 DIFY_API_URL     = os.getenv("DIFY_API_URL",     "https://cloud.dify.ai/v1")
@@ -94,9 +107,7 @@ def _check_config():
 
 async def _transcribe(file: UploadFile) -> str:
     """
-    音频转文字。
-    本地模式: 调 faster-whisper 服务 (:8081)
-    API 模式: 调云端 Whisper API
+    音频转文字（UploadFile 版本，兼容旧调用）。
     """
     content = await file.read()
     if len(content) == 0:
@@ -108,6 +119,16 @@ async def _transcribe(file: UploadFile) -> str:
         return await _transcribe_local(content, file.filename or "audio")
     else:
         return await _transcribe_api(content, file.filename or "audio", file.content_type)
+
+
+async def _transcribe_bytes(content: bytes, filename: str, content_type: str) -> str:
+    """
+    音频转文字（bytes 版本，供后台任务使用）。
+    """
+    if ASR_MODE == "local":
+        return await _transcribe_local(content, filename)
+    else:
+        return await _transcribe_api(content, filename, content_type)
 
 
 async def _transcribe_local(content: bytes, filename: str) -> str:
@@ -216,9 +237,13 @@ async def _push_to_dify(text: str, filename: str) -> dict:
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):
     """
-    上传课堂录音 → ASR 转写 → (可选)推入 Dify 知识库
+    上传课堂录音 → 返回 task_id，后台异步处理
 
-    curl -X POST http://localhost:8080/upload -F "file=@录音.mp3"
+    处理阶段:
+      receiving   → 读取文件
+      transcribing → Whisper 转写
+      indexing    → 推入 Dify 知识库
+      done        → 完成
     """
     # 校验文件类型
     content_type = file.content_type or ""
@@ -227,32 +252,94 @@ async def upload_audio(file: UploadFile = File(...)):
     ):
         log.warning(f"未知音频类型: {content_type}，尝试转写")
 
-    # 转写（不依赖 Dify）
-    text = await _transcribe(file)
+    # 立即读取文件内容
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(400, "文件为空")
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(413, f"文件超过 {MAX_FILE_SIZE // 1024 // 1024}MB 限制")
 
-    # 入库 Dify（可选，配置了才推）
     filename = file.filename or "课堂录音"
-    doc_id = ""
-    dify_ok = not ("DIFY_API_KEY" in _check_config() or "DIFY_DATASET_ID" in _check_config())
-    if dify_ok:
-        try:
-            dify_result = await _push_to_dify(text, filename)
-            doc_id = dify_result.get("document", {}).get("id", "")
-            if doc_id:
-                _save_local(doc_id, filename, text, len(text))
-        except Exception as e:
-            log.warning(f"知识库写入失败（转写不受影响）: {e}")
-    else:
-        log.info("Dify 未配置，跳过知识库入库")
+    task_id = str(uuid.uuid4())
+    now = time.time()
+
+    _cleanup_tasks()
+    _tasks[task_id] = {
+        "phase": "transcribing",
+        "progress": 5,
+        "filename": filename,
+        "file_size": len(content),
+        "created_at": now,
+    }
+
+    # 后台异步处理
+    asyncio.create_task(_process_upload(task_id, content, filename, content_type))
 
     return JSONResponse({
-        "success": True,
-        "text": text,
-        "chars": len(text),
-        "document_id": doc_id,
-        "dify_synced": bool(doc_id),
-        "message": f"已转写 ({len(text)} 字)" + (", 已存入知识库" if doc_id else ""),
+        "task_id": task_id,
+        "phase": "transcribing",
+        "filename": filename,
     })
+
+
+async def _process_upload(task_id: str, content: bytes, filename: str, content_type: str):
+    """后台任务：转写 + 入库，逐阶段更新进度"""
+    try:
+        # 阶段 1: 转写
+        _tasks[task_id].update({"phase": "transcribing", "progress": 10})
+        text = await _transcribe_bytes(content, filename, content_type)
+        _tasks[task_id].update({"phase": "transcribing", "progress": 80})
+
+        # 阶段 2: 入库 Dify
+        doc_id = ""
+        dify_ok = not ("DIFY_API_KEY" in _check_config() or "DIFY_DATASET_ID" in _check_config())
+        if dify_ok:
+            _tasks[task_id].update({"phase": "indexing", "progress": 85})
+            try:
+                dify_result = await _push_to_dify(text, filename)
+                doc_id = dify_result.get("document", {}).get("id", "")
+                if doc_id:
+                    _save_local(doc_id, filename, text, len(text))
+                _tasks[task_id].update({"progress": 95})
+            except Exception as e:
+                log.warning(f"知识库写入失败（转写不受影响）: {e}")
+        else:
+            log.info("Dify 未配置，跳过知识库入库")
+
+        # 完成
+        _tasks[task_id].update({
+            "phase": "done",
+            "progress": 100,
+            "result": {
+                "success": True,
+                "text": text,
+                "chars": len(text),
+                "document_id": doc_id,
+                "dify_synced": bool(doc_id),
+                "message": f"已转写 ({len(text)} 字)" + (", 已存入知识库" if doc_id else ""),
+            },
+        })
+        log.info(f"任务完成: {task_id} | {len(text)} 字")
+
+    except HTTPException as e:
+        _tasks[task_id].update({"phase": "error", "error": e.detail, "progress": 0})
+    except Exception as e:
+        log.error(f"后台任务异常: {task_id} | {e}")
+        _tasks[task_id].update({"phase": "error", "error": str(e)[:200], "progress": 0})
+
+
+@app.get("/upload/{task_id}")
+async def upload_progress(task_id: str):
+    """
+    查询上传/转写进度
+
+    响应:
+      { phase: "transcribing"|"indexing"|"done"|"error", progress: 0-100, ... }
+    """
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在或已过期")
+    return task
 
 
 class ChatRequest(BaseModel):
